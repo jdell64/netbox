@@ -3,6 +3,7 @@ import os
 
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.PublicKey import RSA
+from Crypto.PublicKey.RSA import RsaKey
 
 from django.conf import settings
 from django.contrib.auth.hashers import make_password, check_password
@@ -14,8 +15,8 @@ from django.utils.encoding import force_bytes, python_2_unicode_compatible
 
 from dcim.models import Device
 from utilities.models import CreatedUpdatedModel
-#from netbox.dcim.models import Device
-#from netbox.utilities.models import CreatedUpdatedModel
+# from netbox.dcim.models import Device
+# from netbox.utilities.models import CreatedUpdatedModel
 from .exceptions import InvalidKey
 from .hashers import SecretValidationHasher
 
@@ -47,39 +48,11 @@ def decrypt_master_key(master_key_cipher, private_key):
     return cipher.decrypt(master_key_cipher)
 
 
-# def xor_keys(key_a, key_b):
-#    """
-#   Return the binary XOR of two given keys.
-#  """
-# # encrypts "b" with "a"
-## key_b must be a bytstring
-#    cipher = AES.new(key_a, AES.MODE_CBC)
-#   # xor = XOR.new(key_a)
-#  # return xor.encrypt(key_b)
-# return cipher
-
-
-def aes_encrypt_key(key, plaintext):
-    # encrypt b with a
-    cipher = AES.new(key, AES.MODE_EAX)
-    nonce = cipher.nonce
-    ciphertext, tag = cipher.encrypt_and_digest(plaintext)
-    # xor = XOR.new(key_a)
-    # return xor.encrypt(key_b)
-    return ciphertext, tag, nonce
-
-
-def aes_decrypt_key(key, cyphertext, nonce, tag):
-    # decrypt b with a
-    cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
-    plaintext = cipher.dectypt(cyphertext)
-    try:
-        cipher.verify(tag)
-    except ValueError:
-        raise ValidationError({
-            'aes decrypt': "Key incorrect or message corrupted"
-        })
-    return plaintext
+def xor_keys(key_a: bytes, key_b: bytes):
+    #    """
+    #   Return the binary XOR of two given keys.
+    #  """
+    return bytes(a ^ b for a, b in zip(key_b, key_a))
 
 
 class UserKeyQuerySet(models.QuerySet):
@@ -126,7 +99,7 @@ class UserKey(CreatedUpdatedModel):
 
             # Validate the public key format
             try:
-                pubkey = RSA.importKey(self.public_key)
+                pubkey = RSA.importKey(self.public_key) # type: RsaKey
             except ValueError:
                 raise ValidationError({
                     'public_key': "Invalid RSA key format."
@@ -136,7 +109,7 @@ class UserKey(CreatedUpdatedModel):
                                       "uploading a valid RSA public key in PEM format (no SSH/PGP).")
 
             # Validate the public key length
-            pubkey_length = pubkey.size() + 1  # key.size() returns 1 less than the key modulus
+            pubkey_length = pubkey.size_in_bits() + 1  # key.size() returns 1 less than the key modulus
             if pubkey_length < settings.SECRETS_MIN_PUBKEY_SIZE:
                 raise ValidationError({
                     'public_key': "Insufficient key length. Keys must be at least {} bits long.".format(
@@ -246,8 +219,7 @@ class SessionKey(models.Model):
         self.hash = make_password(self.key)
 
         # Encrypt master key using the session key
-        # self.cipher = xor_keys(self.key, master_key)
-        self.cipher, self.tag, self.nonce = aes_encrypt_key(self.key, master_key)
+        self.cipher = xor_keys(self.key, master_key)
 
         super(SessionKey, self).save(*args, **kwargs)
 
@@ -258,16 +230,14 @@ class SessionKey(models.Model):
             raise InvalidKey("Invalid session key")
 
         # Decrypt master key using provided session key
-        # master_key = xor_keys(session_key, bytes(self.cipher))
-        master_key = aes_decrypt_key(session_key, bytes(self.cipher), self.nonce, self.tag)
+        master_key = xor_keys(session_key, bytes(self.cipher))
 
         return master_key
 
     def get_session_key(self, master_key):
 
         # Recover session key using the master key
-        # session_key = xor_keys(master_key, bytes(self.cipher))
-        session_key = aes_decrypt_key(master_key, bytes(self.cipher), self.nonce, self.tag)
+        session_key = xor_keys(master_key, bytes(self.cipher))
 
         # Validate the recovered session key
         if not check_password(session_key, self.hash):
